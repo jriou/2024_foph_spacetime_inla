@@ -1,0 +1,232 @@
+---
+title: "Spatio-temporal disease mapping with `R-INLA`"
+author: "Julien Riou"
+date: "2024-03-07"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: pygments
+    fig_width: 6
+    fig_height: 3.5
+bibliography: biblio.bib
+---
+
+```{r, include=FALSE}
+rmarkdown::render("1_setup.Rmd")
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+```
+
+# Bayesian inference and `INLA`
+
+Very short reminder about Bayesian inference:
+
+-   alternative to frequentist inference
+
+-   infer parameter values by integrating data and domain knowledge
+
+-   consider all unknown parameters as random variables (i.e., their values have a probability distribution)
+
+-   more efficient for complex models (high dimensionality)
+
+-   rigorously quantify and propagate uncertainty into parameter estimates and predictions
+
+Many excellent resources to learn more [@gelman1995bayesian; @mcelreath_statistical_2016 ; @gomez-rubio_bayesian_nodate].
+
+## Likelihood-based inference
+
+The general principle of Bayesian inference can be expressed using conditional probabilities.
+Consider data $y = \{y_1,...,y_n\}$ that are all observations from a common mean $\theta$ based on a normal distribution with known standard deviation.
+This could for instance be measurements of the height of 100 people taken randomly among Swiss adults, so that $\theta$ is the (unknown) average height in this population.
+We can simulate some data to make it more concrete.
+
+```{r}
+set.seed(217)
+n = 100
+true_theta = 170
+true_sigma = 10
+y = rnorm(n, mean=true_theta, sd=true_sigma)
+ggplot(tibble(y=y),aes(y)) + geom_histogram(bins=30)
+```
+
+We can build the following observation model:
+
+$$\Pr(y|\theta) = \prod_n \text{normal}(y_n | \theta,1)$$
+
+This is also called the **likelihood**.
+It can be interpreted as the probability of observing data $y$ for every value of $\theta$.
+It describes the data generating process given the parameters.
+We can compute the likelihood for our simple example (it's easier done on the log scale).
+
+```{r}
+log_likelihood = function(par) { 
+  loglik = sum(dnorm(y,par,true_sigma,log=TRUE))
+  return(loglik)
+}
+theta = seq(100,200,by=.01)
+loglik = unlist(lapply(theta,log_likelihood))
+lik_values = tibble(theta=theta,loglik=loglik) %>% 
+  mutate(likelihood=exp(loglik))
+ggplot(lik_values,aes(theta,likelihood)) + geom_line(colour="firebrick")
+```
+
+We obtain the probability of observing the data $y$ for each value of unknown $\theta$ between 100 and 200.
+If we were to take the mode of this likelihood function, this would correspond to the **maximum likelihood** estimate of $\theta$ often used in frequentist inference.
+
+```{r}
+lik_mode = lik_values$theta[which.max(lik_values$likelihood)]
+ggplot(lik_values,aes(theta,likelihood)) + geom_line(colour="firebrick") + 
+  geom_vline(xintercept=lik_mode,linetype=2)
+```
+
+```{r}
+lik_mode
+```
+
+## Bayes rule
+
+However, in Bayesian inference we don't want to just get a point estimate, we want to look at the entire distribution of plausible values for $\theta$.
+In mathematical notation, the likelihood is:
+
+$$
+\Pr(y | \theta)
+$$
+
+but what we want to obtain is:
+
+$$
+\Pr(\theta | y),
+$$
+
+the probability distribution of the values of $\theta$ given the data $y$.
+This is called the **posterior distribution**, and this can be obtained using Bayes rule (hence Bayesian inference):
+
+$$
+\Pr(\theta|y) = \frac{\Pr(y|\theta) \Pr(\theta)}{\Pr(y)}.
+$$
+
+In addition to the posterior distribution and the likelihood, we see two additional elements.
+The denominator $\Pr(y)$ can be left aside, as it can be thought of as just a normalizing constant (it does not depend on $\theta$).
+
+The **prior distribution** $\Pr(\theta)$, on the opposite, is very interesting.
+It can be interpreted as the existing knowledge about $\theta$ before observing the data.
+In a way, we combine the prior distribution and the likelihood (and normalize it) to obtain the posterior distribution.
+
+## Prior distribution
+
+The prior distribution can be very flat, just bounded by mathematical constraints (e.g., $\theta$ is a positive number), in which case it's called *non-informative* or *vague*.
+
+```{r}
+tibble(theta=seq(0,1e6,by=100)) %>% 
+  mutate(prior=1/1e6) %>% 
+  ggplot(aes(theta,prior)) + geom_line(colour="dodgerblue") + coord_cartesian(ylim=c(0,2/1e6))
+```
+
+It can be a bit more interesting, e.g. including some real-world constraints. So if $\theta$ is an average height in a population of humans, it should be somewhere between the smallest human (Jyoti Amge, 63 cm) and the tallest human (Sultan Kosen, 246 cm).
+In that case the prior would be called *weakly-informative*.
+
+<center>
+![Figure. *Jyoti Amge, the smallest adult woman in the world, and Sultan Kosen, the tallest man in the world, visiting the pyramids.*](figures/heights.png){width=50%}
+</center>
+
+```{r}
+bounds = c(63,246)
+tibble(theta=seq(0,300,by=1)) %>% 
+  mutate(prior=dnorm(theta,mean=mean(bounds),sd=diff(bounds)/(2*1.96))) %>% 
+  ggplot(aes(theta,prior)) + geom_line(colour="dodgerblue")
+```
+
+The prior can also be the posterior from previous estimations of the same parameter, in which case, it can be designed as *informative*.
+This idea is related to the concept of Bayesian updating, whereby additional data can be added sequentially to improve the estimation.
+
+```{r}
+previous_theta = 168
+tibble(theta=seq(0,300,by=1)) %>% 
+  mutate(prior=dnorm(theta,mean=previous_theta,sd=0.1)) %>% 
+  ggplot(aes(theta,prior)) + geom_line(colour="dodgerblue")
+```
+
+Last, priors are sometimes chosen for practical reasons, because they make the computation of the posterior distribution simple (e.g. conjugate priors even make it closed-form) or easier (e.g. penalized complexity priors).
+
+## Computing the posterior with MCMC
+
+In most cases though the posterior distribution cannot be directly calculated (in particular because of $\Pr(y)$).
+A common approach is to learn about the posterior distribution by drawing samples from it, which is often possible without knowing its exact expression.
+This is the basis of **Monte Carlo** methods, that have applications in many areas.
+
+<center>
+![Figure. *Monte Carlo approach to determine the area of a lake using random artillery fire.*](figures/Montecarlo.png)
+</center>
+
+Markov chain Monte Carlo (MCMC) methods apply a similar principle to probability distributions.
+MCMC algorithms explore the posterior distribution with samples, asymptotically approximating the unknown true distribution.
+Several MCMC algorithms exist, with different implementations in `R` (e.g., `BUGS`,`Stan`, `JAGS`, `nimble`...).
+
+<center>
+![Figure. *A Metropolis-Hastings algorithms exploring a bivariate normal target distribution (https://chi-feng.github.io/mcmc-demo/app.html).*](figures/rwmh_binormal.png){width=50%}
+</center>
+
+We can apply MCMC to our simple example, for instance with package `brms` (that uses `Stan` under the hood). 
+The installation of `brms` can be long, and it's not the main topic here, so there is no need to run the next chunk.
+
+```{r}
+if(FALSE) {
+  library(brms)
+  # with the weakly-informative prior based on the smallest and tallest humans
+  weakly_informative_prior =  brms::set_prior("normal(154.5,47)", class="Intercept")
+  mcmc_estimate_wif = brms::brm(y~1, 
+                                family=gaussian(),
+                                prior=weakly_informative_prior,
+                                data=tibble(y=y))
+  summary(mcmc_estimate_wif)
+}
+```
+
+<center>
+![](figures/brms_fit.png)
+</center>
+
+## Integrated Laplace approximation
+
+MCMC is very effective but computationally intensive. 
+`R-INLA` uses a different approach called *integrated nested Laplace approximation* [@rue2009approximate].
+The approximation the posterior distribution, one parameter at a time, works for models that can be expressed as latent Gaussian Markov random fields (which cover many situations).
+
+In practice, `R-INLA` is most useful for temporal, spatial and spatio-temporal models, but can be used in many situations.
+The syntax is pretty similar to `lm` and `glm` in base `R`, that has also inspired many popular modelling packages (`lme4`, `brms`, `rstanarm`).
+A difference of `R-INLA` is the focus on precision (inverse of variance) rather than variance or standard deviation.
+Some basic tasks are also somewhat more difficult in `R-INLA`, like prediction.
+
+```{r}
+weakly_informative_prior = list(mean.intercept = 154.5, prec.intercept = 1/47^2)
+inla_estimate_wif = inla(y~1,
+                         family = "gaussian",
+                         data = tibble(y=y),
+                         control.fixed = weakly_informative_prior)
+summary(inla_estimate_wif)
+```
+
+```{r}
+inla_estimate_wif$marginals.fixed$`(Intercept)` %>% 
+  as_tibble() %>% 
+  ggplot(aes(x,y)) + 
+  geom_line(colour="forestgreen") +
+  geom_vline(xintercept=true_theta,colour="orange")
+```
+
+The posterior distribution can then be summarized, generally by its mean (`mean`) or median (`0.5quant`) and by its 2.5th and 97.5th percentiles (`0.025quant` and `0.975quant`) constituting the **95% credible interval**. 
+Contrary to the 95% confidence interval in frequentist inference, the 95% credible interval has a direct and easy interpretation: there is a 95% probability that the parameter value lies within its bounds.
+Other outputs such as `sd` and `mode` are less useful. 
+The Kullback-Leibler divergence (`kld`) describes the difference between the Gaussian and the simplified or full Laplace approximations for each posterior (it should be close to 0).
+
+There are also the model **hyperparameters**. In this case, there is only "precision for the Gaussian observations". 
+This refers to `true_sigma`, but on the precision scale (precision is the inverse of the variance). 
+
+
+```{r}
+1/true_sigma^2
+```
+
+# References

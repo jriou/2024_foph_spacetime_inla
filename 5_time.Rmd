@@ -1,0 +1,345 @@
+---
+title: "Spatio-temporal disease mapping with `R-INLA`"
+author: "Julien Riou"
+date: "2024-03-07"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+bibliography: biblio.bib  
+---
+
+```{r, include=FALSE}
+rmarkdown::render("1_setup.Rmd")
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+```
+
+# Temporal models in `R-INLA`
+
+Now we change the focus from space to time, focusing on weekly cases at the national level. 
+
+```{r}
+flu_week_ch = flu %>% 
+  filter(georegion=="CHFL", agegroup=="all", sex=="all", type=="all") %>% 
+  mutate(week_of_season=lag(week_of_year,flu_season_start_week),
+         week_of_season=ifelse(is.na(week_of_season),lead(week_of_season,52),week_of_season))
+```
+
+```{r}
+ggplot(flu_week_ch,aes(x=week,y=value)) +
+  geom_point(shape=21)
+```
+
+## Random walks
+
+### `rw1` model
+
+The first approach we can try to model a time series is a random walk, which is a special type of random effect.
+A random walk of order 1 (`rw1`) assumes that every increment from one time point to the next $\Delta y_t = y_t - y_{t-1}$ follows a normal distribution.
+It is discrete by definition, so it is well suited to regular time series (data by day or week or month). There are also continuous versions.
+
+```{r}
+m_week1 = inla(value ~ 1 +
+                 f(week_index, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE),
+               offset = log(pop),
+               data=flu_week_ch,
+               family = "poisson",
+               control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+               control.compute = list(waic=TRUE))
+summary(m_week1)
+```
+
+We can look at the model fit to get a sense of how it works.
+
+```{r}
+m_week1$summary.fitted.values %>% 
+  bind_cols(flu_week_ch) %>% 
+  ggplot(aes(x=week)) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`),fill="orange",alpha=.5) +
+  geom_point(aes(y=value),shape=21)  +
+  geom_line(aes(y=mean),colour="orange") 
+```
+
+Let us zoom at one particular epidemic season.
+
+```{r}
+m_week1$summary.fitted.values %>% 
+  bind_cols(flu_week_ch) %>% 
+  filter(season=="2021-2022") %>% 
+  ggplot(aes(x=week)) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`),fill="orange",alpha=.5)  +
+  geom_line(aes(y=mean),colour="orange") +
+  geom_point(aes(y=value),shape=21) 
+```
+
+The model seems to fit the data quite well.
+Actually, maybe too well! 
+The predictions from the model follow every change, and the uncertainty intervals are narrow, which indicates some degree of **overfitting**.
+Still, it might not be a problem as the data is not particularly wiggly.
+This problem often occurs when using Poisson regression in time series.
+It comes from the large variations across time, and the fact that the variance doesn't scale well for small and large counts.
+We can try the "overdispersed" version of Poisson regression, negative binomial regression.
+
+```{r}
+m_week2 = inla(value ~ 1 +
+                 f(week_index, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE),
+               offset = log(pop),
+               data=flu_week_ch,
+               family = "nbinomial",
+               control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+               control.compute = list(waic=TRUE))
+summary(m_week2)
+```
+
+```{r}
+m_week2$summary.fitted.values %>% 
+  bind_cols(flu_week_ch) %>% 
+  filter(season=="2021-2022") %>% 
+  ggplot(aes(x=week)) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`),fill="orange",alpha=.5)  +
+  geom_line(aes(y=mean),colour="orange") +
+  geom_point(aes(y=value),shape=21) 
+```
+
+The difference is not that striking. Uncertainty intervals are slightly larger.
+We can look at the WAIC to compare the two versions.
+
+```{r}
+m_week1$waic$waic
+m_week2$waic$waic
+```
+
+The WAIC is actually lower for Poisson than for negative binomial, so we continue with the former.
+But in many situations (especially when there is a lot of variation), the negative binomial model will probably be better.
+
+The next thing we want to try is a **second order random walk**.
+It follows the same principle as first order random walk, but takes into account the increment over the last two observations rather than only the last one.
+The advantage is that it can provide more smoothing and not follow every deviation.
+
+```{r}
+m_week3 = inla(value ~ 1 +
+                 f(week_index, model="rw2", hyper=list(prec = list(param = c(1, 0.1)))),
+               offset = log(pop),
+               data=flu_week_ch,
+               family = "poisson",
+               control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+               control.compute = list(waic=TRUE))
+summary(m_week3)
+```
+
+```{r}
+m_week3$summary.fitted.values %>% 
+  bind_cols(flu_week_ch) %>% 
+  filter(season=="2021-2022") %>% 
+  ggplot(aes(x=week)) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`),fill="orange",alpha=.5)  +
+  geom_line(aes(y=mean),colour="orange") +
+  geom_point(aes(y=value),shape=21) 
+```
+
+```{r}
+m_week1$waic$waic
+m_week3$waic$waic
+```
+
+Again, the difference is not striking, and the WAIC is worse, so that it does not seems to be helpful in this case.
+It's also possible to control the level of smoothness by using more constrained priors, for instance penalized complexity priors (`hyper=list(prec = list(prior="pc.prior",param = c(1, 0.1)))`).
+
+## Autoregressive
+
+Autoregressive random effects are another class of models useable in this situation, that behave slightly differently.
+For first order autoregressive models (`ar1`), the value on time $t$ depends on the value on time $t-1$ and a correlation coefficient $\rho$.
+It results in generally smoother estimates than `rw1`.
+Autoregressive models of higher order consider more past observations (up to 10).
+It is slightly more complicated to implement (see `inla.doc("^ar$")`).
+
+```{r}
+m_week4 = inla(value ~ 1 +
+                 f(week_index, model="ar1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE),
+               offset = log(pop),
+               data=flu_week_ch,
+               family = "poisson",
+               control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+               control.compute = list(waic=TRUE))
+summary(m_week4)
+```
+
+```{r}
+m_week4$summary.fitted.values %>% 
+  bind_cols(flu_week_ch) %>% 
+  filter(season=="2021-2022") %>% 
+  ggplot(aes(x=week)) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`),fill="orange",alpha=.5)  +
+  geom_line(aes(y=mean),colour="orange") +
+  geom_point(aes(y=value),shape=21) 
+```
+
+```{r}
+m_week1$waic$waic
+m_week4$waic$waic
+```
+
+In this case it doesn't really make a difference, but it still good to keep in mind.
+
+## Seasonality 
+
+It is possible to add multiple components in order to disentangle between effects over different scales.
+For instance, we can decompose the time series of influenza into two components: a seasonal effect based on the week of the year and a residual effect capturing deviations from the average.
+
+```{r}
+flu_week_ch2 = flu_week_ch %>% filter(week_of_year!=53) # best to remove the 53rd week as it messes with the seasonality
+m_week4 = inla(value ~ 1 + 
+                 f(week_index, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                 f(week_of_year, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr = TRUE),
+               offset = log(pop),
+               data=flu_week_ch2,
+               family = "poisson",
+               control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+               control.compute = list(waic=TRUE))
+summary(m_week4)
+```
+
+
+```{r}
+m_week4$summary.fitted.values %>% 
+  bind_cols(flu_week_ch2) %>% 
+  ggplot(aes(x=week_of_season)) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`,fill=year2),alpha=.5)  +
+  geom_line(aes(y=mean,,colour=year2)) +
+  geom_point(aes(y=value),shape=21) +
+  scale_fill_viridis_d() + scale_colour_viridis_d() + coord_cartesian(ylim=c(0,5000))
+```
+
+```{r}
+m_week4$summary.random$week_of_year %>% 
+  select(week_of_year=ID,mean,`0.025quant`,`0.975quant`) %>% 
+  mutate(across(2:4,exp)) %>%
+  left_join(flu_week_ch2 %>% filter(year==2023) %>% select(week_of_year,week_of_season) %>% distinct(),by = join_by(week_of_year)) %>% 
+  ggplot(aes(x=week_of_season)) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`),alpha=.5)  +
+  geom_line(aes(y=mean))
+```
+
+This seasonal effect can be interpreted as the average profile of influenza reports over the year.
+Note that this effect is multiplicative (because of the $\log$) and applies to the other effects times the population.
+It is also centered around zero (1 after exponentiation).
+
+From this average shape there can be deviations which are captures by the other `rw1` component.
+
+```{r}
+m_week4$summary.random$week_index %>% 
+  select(week_index=ID,mean,`0.025quant`,`0.975quant`) %>% 
+  mutate(across(2:4,exp)) %>%
+  bind_cols(flu_week_ch2) %>% 
+  ggplot(aes(x=week_of_season)) +
+  # geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`,fill=as.factor(year)),alpha=.5)  +
+  geom_line(aes(y=mean,colour=season)) +
+   scale_colour_viridis_d() 
+```
+
+This really highlights how special the flu seasons have been since 2020.
+
+```{r}
+m_week4$summary.random$week_index %>% 
+  select(week_index=ID,mean,`0.025quant`,`0.975quant`) %>% 
+  mutate(across(2:4,exp)) %>%
+  bind_cols(flu_week_ch2) %>% 
+  filter(season %in% c("2020-2021","2021-2022","2022-2023","2023-2024")) %>% 
+  ggplot(aes(x=week_of_season)) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`,fill=season),alpha=.5)  +
+  geom_line(aes(y=mean,colour=season))
+```
+
+Note that there is also the `seasonal` model, but it is somewhat more difficult to handle.
+
+## Reporting delays
+
+Let's now assume that there is a reporting delay: 50% of cases are reported on the same week, 30% in week $t+1$ and 20% in week $t+2$.
+This data is not available here, but it is a pretty common situation, and we can simulate it.
+The data should be put in "long" format.
+
+```{r}
+delay_prob = c(.5,.3,.2)
+delay_max = 2
+flu_week_ch_delay = flu_week_ch2 %>% 
+  # select(week,year,week_index,value,pop) %>% 
+  mutate(delay0=rbinom(nrow(flu_week_ch2),size=value,prob=delay_prob[1]),
+         delay1=rbinom(nrow(flu_week_ch2),size=value-delay0,prob=delay_prob[2]/(1-delay_prob[1])),
+         delay2=value-delay0-delay1) %>% 
+  gather(key=delay, value=value_delayed,delay0:delay2) %>% 
+  mutate(delay=parse_number(delay))
+```
+
+If we place ourselves at the end of a given week (e.g. February 8th, 2024)
+
+```{r}
+cutoff = 580
+flu_week_ch_delay_trim = flu_week_ch_delay %>% 
+  arrange(week_index,delay) %>% 
+  mutate(true_value=value,
+         true_value_delayed=value_delayed,
+         value=ifelse(week_index>cutoff,NA,value),
+         value_delayed=ifelse(week_index+delay>cutoff,NA,value_delayed)) %>% 
+  filter(week_index<=cutoff) %>% 
+  group_by(week_index) %>% 
+  mutate(value=sum(value_delayed,na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  mutate(week_index2=week_index, delay2=delay+1) # duplicate indexes
+flu_week_ch_delay_trim %>% 
+  select(week,week_index,delay,true_value,true_value_delayed,value,value_delayed) %>% 
+  tail(10)
+```
+
+```{r}
+flu_week_ch_delay_trim %>% 
+  filter(season=="2023-2024",delay==0) %>% 
+  ggplot(aes(x=week)) +
+  geom_col(aes(y=true_value),colour="black") +
+  geom_col(aes(y=value),fill="orange",colour="black")
+```
+
+We can adjust for the reporting delay following the approach proposed by [@bastos2019modelling].
+
+```{r}
+m_week5 = inla(value_delayed ~ 1 + 
+                 f(week_index, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                 f(week_of_year, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr = TRUE) +
+                 f(delay, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr = TRUE) + 
+                 f(week_index2, model="rw1", replicate=delay2, hyper=list(prec=list(param=c(1, 0.1))), constr = TRUE),
+               offset = log(pop),
+               data = flu_week_ch_delay_trim,
+               family = "poisson",
+               control.predictor = list(link = 1, compute = TRUE), # option to compute model prediction for NA value
+               control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+               control.compute = list(waic=TRUE))
+summary(m_week5)
+```
+
+
+```{r}
+m_week5$summary.fitted.values %>% 
+  bind_cols(flu_week_ch_delay_trim) %>% 
+  filter(season=="2023-2024") %>% 
+  group_by(week) %>% 
+  summarise(value=max(value),
+            true_value=max(true_value),
+            pred_value=sum(mean)) %>% 
+  ggplot(aes(x=week)) +
+  geom_col(aes(y=true_value),colour="black") +
+  geom_col(aes(y=value),fill="orange",colour="black") +
+  geom_line(aes(y=pred_value),colour="dodgerblue",size=2,alpha=.6)
+```
+
+The model prediction closely matches the unobserved true value.
+It is possible to obtain the uncertainty intervals by sampling from the posterior of `value_delayed` with function `inla.posterior.sample()`, and summing the samples by week.
+
+## Exercice
+
+Try the approach by [@bastos2019modelling] for longer reporting delays, e.g. 5 or 7 weeks, and use `inla.posterior.sample()` to compute the uncertainty around the corrected value.
+
+# References

@@ -1,0 +1,85 @@
+---
+title: "Spatio-temporal disease mapping with `R-INLA`"
+author: "Julien Riou"
+date: "2024-03-07"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+bibliography: biblio.bib  
+---
+
+# Set-up
+
+## Libs
+
+```{r setup}
+library(tidyverse)
+library(sf)
+library(ISOweek)
+library(spdep)
+```
+
+## `R-INLA` is not on CRAN!
+
+See details on https://www.r-inla.org/download-install.
+
+```{r}
+if(FALSE) install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+library(INLA)
+```
+
+## Test `R-INLA` installation
+
+```{r}
+n = 300; a = 42; b = 2.3; s = 8
+x = runif(n,0,10)
+lp = a + b*x
+y = rnorm(n,lp,s)
+dd = data.frame(x=x,y=y)
+ggplot(dd,aes(x,y)) + geom_point()
+```
+
+```{r}
+test_lm = lm(y ~ x, data=dd)
+summary(test_lm)
+```
+
+```{r}
+test_inla = inla(y ~ x, family = "gaussian", data=dd)
+summary(test_inla)
+```
+
+## Prepare influenza data
+
+### Download, unzip and load
+
+```{r}
+pathfile = "data/INFLUENZA_oblig.zip"
+if(!file.exists("data/INFLUENZA_oblig.zip")) {
+  download.file("https://idd.bag.admin.ch/api/v1/export/20240221/INFLUENZA_oblig/zip",
+                destfile = "data/INFLUENZA_oblig.zip",
+                method="curl")
+  unzip(zipfile="data/INFLUENZA_oblig.zip", exdir = "data/INFLUENZA_oblig/")
+}
+flu = readr::read_csv("data/INFLUENZA_oblig/data.csv")
+```
+
+### Data management
+
+```{r}
+flu_season_start_week = 35
+flu = flu %>% 
+  mutate(week=ISOweek::ISOweek2date(paste0(temporal,"-4")), # replace ISOweek string with date of the Thursday of each week
+         year=lubridate::year(week),                 
+         year2=as.factor(year),                      
+         week_of_year=lubridate::week(week)) %>%      
+  filter(year>=2013)
+flu$week_index = as.numeric(flu$week-min(flu$week))/7+1
+flu$season = ifelse(flu$week_of_year<flu_season_start_week,paste0(flu$year-1,"-",flu$year),paste0(flu$year,"-",flu$year+1))
+```

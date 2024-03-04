@@ -1,0 +1,162 @@
+---
+title: "Spatio-temporal disease mapping with `R-INLA`"
+author: "Julien Riou"
+date: "2024-03-07"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+bibliography: biblio.bib  
+---
+
+```{r, include=FALSE}
+rmarkdown::render("1_setup.Rmd")
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+```
+
+# Spatial models in `R-INLA`
+
+Let's continue with the yearly reported cases of influenza by canton in 2022.
+
+```{r}
+flu_year_ch_canton = flu %>% 
+  filter(georegion_type=="canton", georegion!="unknown", agegroup=="all", sex=="all", type=="all") %>% 
+  group_by(georegion,year) %>% 
+  summarise(value=sum(value),pop=max(pop),.groups="drop") %>% 
+  filter(year==2022) %>% 
+  mutate(canton_id=as.numeric(as.factor(georegion))) 
+```
+
+This time it's important to make sure to index cantons in the same way in all data sources.
+So let's make a correspondence table.
+
+```{r}
+lookup_canton = flu_year_ch_canton %>% 
+  select(georegion,canton_id) %>% 
+  distinct()
+```
+
+We already built a spatial model with an i.i.d. random effect on canton.
+Here it is again.
+
+```{r}
+m_canton_ch1 = inla(value ~ 1 +
+                      f(canton_id, model="iid", hyper=list(prec=list(param=c(1, 0.1)))),
+                    offset = log(pop),
+                    data = flu_year_ch_canton,
+                    family = "poisson",
+                    control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+                    control.compute = list(waic=TRUE))
+summary(m_canton_ch1)
+```
+
+One limitation is that this i.i.d. random effect assumes that all cantons are independent. 
+More specifically, it ignores the **spatial structure** of cantons: we expect cantons that are close to each other to behave more similarly than cantons that are far away.
+
+One way to account for that is to use models based on an **adjacency matrix**, that contain information on whether two areas are neighbors or not.
+We can create an adjacency matrix from geographical data known as shape files.
+In the following, we will download the shape file of Swiss cantons from SWISSTOPO and create the adjacency matrix.
+
+```{r}
+pathfile2 = "data/swissboundaries3d"
+if(!file.exists(pathfile2)) {
+  download.file("https://data.geo.admin.ch/ch.swisstopo.swissboundaries3d/swissboundaries3d_2024-01/swissboundaries3d_2024-01_2056_5728.shp.zip",
+                destfile = pathfile2,
+                method="curl")
+  unzip(zipfile=pathfile2, exdir = "data/shapefile/")
+}
+shape_cantons = sf::st_read("data/shapefile/swissBOUNDARIES3D_1_5_TLM_KANTONSGEBIET.shp") %>% 
+  st_zm() %>% # remove 3rd dimension
+  mutate(georegion=c("GE","TG","VS","AG","SZ","ZH","OW","FR","GL","UR","NW","SO","AR","JU",
+                     "GR","VD","LU","TI","ZG","BL","SG","SH","BE","BS","NE","AI")) %>% 
+  arrange(georegion) %>% # make sure that the order is the same as in the data
+  left_join(lookup_canton,by = join_by(georegion)) %>% 
+  arrange(canton_id)
+saveRDS(shape_cantons,file="data/shape_cantons.rds")
+```
+
+```{r}
+ggplot(shape_cantons) +
+  geom_sf()
+```
+
+Here we take the simplest case of whether cantons share a border or not, but there are many ways to consider adjacency [@neighborhood].
+
+```{r}
+shape_cantons_adj = spdep::poly2nb(shape_cantons)
+spdep::nb2INLA("data/shape_cantons_adj", shape_cantons_adj)
+str(shape_cantons_adj)
+```
+
+```{r}
+plot(st_geometry(shape_cantons), border = "lightgrey")
+plot.nb(shape_cantons_adj, st_geometry(shape_cantons), add = TRUE)
+```
+
+There are several spatial models that work with such adjacency matrix, but we will focus on the one by Besag, York and Mollié (**BYM**) [@besag1991bayesian].
+Simply put, the idea is to allow cantons that share a border to be more correlated than cantons that don't share a border. 
+This is done using a conditional autoregressive model (CAR).
+The BYM model combines a CAR with an i.i.d random effect, so it can measure how important is the spatial structure provided by the adjacency matrix.
+This importance is measure by the parameter $\phi$, that can range from 0 (no spatial structure, i.i.d. explains all variation) to 1 (dominant spatial structure, adjacency explains all variation).
+
+```{r}
+prior_bym = list(theta1 = list('PCprior', c(1, 0.01)), theta2 = list('PCprior', c(0.5, 0.5)))
+m_canton_ch2 = inla(value ~ 1 +
+                           f(canton_id, model="bym2", graph="data/shape_cantons_adj", hyper=prior_bym),
+                         offset = log(pop),
+                         data=flu_year_ch_canton,
+                         family = "poisson",
+                         control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+                         control.compute = list(waic=TRUE))
+summary(m_canton_ch2)
+```
+
+Note that we use penalized complexity (PC) priors for $\phi$ [@simpson2017penalising].
+We can interpret $\phi$ as explained above: about half the variation across cantons can be explained by the adjacency structure.
+More technical information is available in `inla.doc("bym2")`.
+
+```{r}
+irr = m_canton_ch1$summary.random$canton_id %>%
+  select(ID,mean,`0.025quant`,`0.975quant`) %>%
+  mutate(across(2:4,exp),
+         type="i.i.d. model") %>% 
+  rename(canton_id=ID) %>% 
+  left_join(lookup_canton,by = join_by(canton_id)) 
+irr2 = m_canton_ch2$summary.random$canton_id %>%
+  select(ID,mean,`0.025quant`,`0.975quant`) %>%
+  filter(ID<27) %>%  # there are twice as many random effects as cantons, the second part conrresponds only to the iid part
+  mutate(across(2:4,exp), type="BYM model") %>% 
+  rename(canton_id=ID) %>% 
+  left_join(lookup_canton,by = join_by(canton_id)) 
+irr_all = bind_rows(irr,irr2) %>% 
+  arrange(mean)
+ggplot(irr_all,aes(x=georegion,y=mean,ymin=`0.025quant`,ymax=`0.975quant`,colour=type)) +
+  geom_pointrange(position=position_dodge(.8)) +
+  geom_hline(yintercept=1,linetype=2) +
+  scale_x_discrete(limits=irr_all$georegion)
+```
+
+If we compare the results by canton, expressed as IRRs, we see that the i.i.d. and the BYM models generally agree on the mean estimate, but that the BYM generally has less uncertainty. 
+This is explained by the fact that information is pooled across cantons, which improves the estimate, especially in smaller areas (this issue is known as **small area estimation**).
+Besides being able to adjust on many different covariates, one of the main advantages of spatial models (compared to just computing differences in total cases between cantons) is this handling of uncertainty and small area estimation.
+
+Just for good measure (because it's a spatial model) let's put the IRR estimates on a map.
+
+```{r}
+shape_cantons %>% 
+  left_join(irr2,by = join_by(georegion, canton_id)) %>% 
+  ggplot() +
+  geom_sf(aes(fill=mean)) +
+  scale_fill_viridis_c()
+```
+
+## Exercice
+
+Compare the incidence rate ratios of reported cases of influenza by canton across time.
+
+# References

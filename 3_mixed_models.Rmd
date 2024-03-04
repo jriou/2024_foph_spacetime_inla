@@ -1,0 +1,245 @@
+---
+title: "Spatio-temporal disease mapping with `R-INLA`"
+author: "Julien Riou"
+date: "2024-03-07"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+bibliography: biblio.bib  
+---
+
+```{r, include=FALSE}
+rmarkdown::render("1_setup.Rmd")
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+```
+
+# Mixed models in `R-INLA`
+
+## Fixed effects
+
+Fixed effects are often used to quantify the link between the outcome and covariates of central interest, thought to systematically affect the outcome in the same way.
+A simple example would be to study how is sex associated with the number of reported cases of influenza in the obligatory system.
+To do that, we can start by aggregating cases by year.
+
+```{r}
+flu_year_ch_sex = flu %>% 
+  dplyr::filter(georegion=="CHFL", agegroup=="all", sex %in% c("male","female"), type=="all") %>% 
+  dplyr::group_by(sex,year) %>% 
+  dplyr::summarise(value=sum(value),pop=max(pop),.groups="drop")
+```
+
+```{r}
+ggplot(flu_year_ch_sex, aes(x=year,y=value,colour=sex,group=sex)) +
+  geom_point() +
+  geom_line()
+```
+
+We see a tendency towards more reported cases among women. 
+We can measure the average difference with Poisson regression. 
+This assumes that the number of reported cases on any year follows a Poisson distribution with mean $\lambda_i$:
+$$ 
+y_i \sim \text{Poisson}(\lambda_i) \\
+\log\lambda_i = \alpha + \beta X_i \\
+\alpha \sim \mathcal{N}(0,10)\\
+\beta \sim \mathcal{N}(0,10) 
+$$
+If we set $X_i$ as `0` for women and `1` for men, this means that the expected number of cases will have mean $\exp(\alpha)$ for women and  $\exp(\alpha+\beta)$ for
+men. In other words, the incidence ratio between men and women will be:
+
+$$ IR = \frac{\exp(\alpha+\beta)}{\exp(\alpha)} =  \frac{\exp(\alpha)\times\exp(\beta)}{\exp(\alpha)} = \exp(\beta).$$
+
+```{r}
+m_year_sex_ch1 = inla(value ~ 1 + sex, 
+                      data=flu_year_ch_sex, 
+                      family = "poisson",
+                      control.fixed = list(mean.intercept=0, prec.intercept=1/10^2, mean=0, prec=1/10^2))
+summary(m_year_sex_ch1)
+```
+
+The rows `(Intercept)` and `sexmale` provide summary statistics for the posterior distribution of $\alpha$ and $\beta$. 
+But as said before, what we are interested in (because it has a real-life interpretation) are the exponentials of $\alpha$ and $\beta$.
+
+```{r}
+exp(m_year_sex_ch1$summary.fixed[,c("mean","0.025quant","0.975quant")])
+```
+
+These results can be interpreted as follows: we expect on average 5063 cases of influenza in women per year (95% credible interval: 5023 to 5103), and we expect the number of male cases to be 6% lower (5% to 7%) than the number of female cases.
+This is the type of approach where fixed effects shine.
+
+## Random effects
+
+Random effects relate to situations where model parameters are considered as random variables.
+In practice, this is used when we effect an effect to be heterogeneous across different groups, generally more than 5 or 6 groups.
+Instead of measuring the effect in each group compared to a reference group (e.g., males compared to females), we consider the distribution of effects, generally around zero, with a certain standard deviation or precision (for normally-distributed which are the most common).
+In this context, the standard deviation is called an **hyperparameter** and can be estimated from data. 
+The standard deviation can be interpreted as a measure of the heterogeneity of the effect across groups.
+If we go back to the example of the Poisson regression above, the formula becomes:
+$$ 
+y_i \sim \text{Poisson}(\lambda_i) \\
+\log\lambda_i = \alpha + \beta_i \\
+\alpha \sim \mathcal{N}(0,10) \\
+\beta_i \sim \mathcal{N}(0,\tau\Sigma) \\
+\tau \sim \mathcal{Gamma}(1.0.00005) \\
+$$
+The formula is slightly more complex, with the hyperparameter $\tau$ (the precision) that must be given a prior distribution.
+We won't dig into how to choose prior distributions for scale parameters here (there are a few possible approaches based on heuristics or simulation [@gabry_visualization_2019;@stan_development_team_prior_nodate]).
+In `INLA` it is generally fine to stick to the (non-informative) defaults.
+
+## I.i.d. random effects
+
+The type of random effect is defined by the matrix $\Sigma$. 
+In the simplest case, $\Sigma$ is an identity matrix, so that all $\beta_i$ are **independent and identically distributed** (i.i.d).
+We can try this with the gender example, even if it would not make so much sense to use random effects for two groups.
+
+```{r}
+m_year_sex_ch2 = inla(value ~ 1 + f(sex, model="iid", precision = c(1, 0.00005)), 
+                      data=flu_year_ch_sex, 
+                      family = "poisson",
+                      control.fixed = list(mean.intercept=0, prec.intercept=1/10^2))
+summary(m_year_sex_ch2)
+```
+
+The intercept didn't change much. 
+Since it's not a fixed effect anymore, the effect of gender does not appear directly, but can be extracted from the model object.
+
+```{r}
+m_year_sex_ch2$summary.random$sex
+```
+
+It's interesting to note that instead of having an effect in males compared to females of `-0.066`, we find basically half of this effect on each side of zero: `-0.032` in males and `+0.032` in females.
+Random effects are not defined relatively to each other, but relatively to a mean set at zero. 
+And as before, it is easier to interpret the exponents.
+
+```{r}
+exp(m_year_sex_ch2$summary.random$sex[,c("mean","0.025quant","0.975quant")])
+```
+
+Compared to an "average gender", there are 3% more female cases and 3% less male cases.
+Of course in the case of gender the average does not make so much sense (although), but it would work well for other variables (average country, average canton, average family, etc.).
+Indeed, random effects are often used for building nested **hierarchies** (e.g., canton within country, or classroom within school). 
+
+## Fixed or random?
+
+Sometimes it's not so clear whether a variable should be included as a fixed or random effect.
+Things to consider include the number of groups (more or fewer than 5-6) and the objective (do we look for an average effect or do we want to compare groups to each other).
+It is also possible to try both and see which one fits the data best.
+There are many tools for doing such **model comparisons** (in many situations, not just this one).
+Classically people have been using the Akaike Information Criterion (AIC).
+This indicator is based on information theory, and is comparatively **lower** for models that minimize information loss.
+Intuitively, it provides a balance between how close the model is to the data with how complex the model is (i.e. how many parameters it has).
+Other, more modern criteria exist, such as the WAIC (for widely applicable information criterion).
+It works in a similar way (lower is better) and is available in `INLA`.
+We just have to mention it in the call.
+
+```{r}
+m_year_sex_ch1 = inla(value ~ 1 + sex, 
+                      data=flu_year_ch_sex, 
+                      family = "poisson",
+                      control.fixed = list(mean.intercept=0, prec.intercept=1/10^2, mean=0, prec=1/10^2),
+                      control.compute = list(waic = TRUE))
+m_year_sex_ch2 = inla(value ~ 1 + f(sex, model="iid", precision = c(1, 0.01)), 
+                      data=flu_year_ch_sex, 
+                      family = "poisson",
+                      control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+                      control.compute = list(waic = TRUE))
+m_year_sex_ch1$waic$waic
+m_year_sex_ch2$waic$waic
+```
+
+By computing the WAIC for the models with gender included as a fixed or random effect, we see that the former has a lower WAIC than the latter, so than it should be favored.
+
+## First spatial model
+
+If we go back to the example and instead of gender look at canton, we can try to use an i.i.d. random effect to build our first spatial model.
+
+```{r}
+flu_year_ch_canton = flu %>% 
+  filter(georegion_type=="canton", georegion!="unknown", agegroup=="all", sex=="all", type=="all") %>% 
+  group_by(georegion,year) %>% 
+  summarise(value=sum(value),pop=max(pop),.groups="drop")
+```
+
+```{r}
+ggplot(flu_year_ch_canton, aes(x=year,y=value,colour=georegion,group=georegion)) +
+  geom_point() +
+  geom_line()
+```
+
+Of course, since the populations of each canton are so different, it makes more sense to not use the raw number and scale by population.
+
+```{r}
+ggplot(flu_year_ch_canton, aes(x=year,y=value/pop*1e5,colour=georegion,group=georegion)) +
+  geom_point() +
+  geom_line()
+```
+
+In the model, this scaling can be done by using an **offset**.
+If we go back to the formula for the Poisson regression model with random effects, we can add the offset $O_i$ so that it acts as a denominator.
+$$ 
+\log\lambda_i = \alpha + \beta_i + \log O_i \\
+\log\lambda_i - \log O_i = \alpha + \beta_i  \\
+\log\frac{\lambda_i}{O_i} = \alpha + \beta_i
+$$
+This way, we can still use Poisson regression (that is adapted to count data and would not work with incidence rates).
+
+Let us focus on one year, for instance 2022.
+
+```{r}
+flu_year_ch_canton = flu_year_ch_canton %>% 
+  filter(year==2022)
+```
+
+The model is written as follows:
+
+```{r}
+m_canton_ch1 = inla(value ~ 1 + 
+                      f(georegion, model="iid", precision = c(1, 0.01)),
+                    offset = log(pop),
+                    data=flu_year_ch_canton, 
+                    family = "poisson",
+                    control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+                    control.compute = list(waic=TRUE))
+summary(m_canton_ch1)
+```
+
+We can look at the distribution of the canton-specific effect $\beta_i$ (centered around zero).
+
+```{r}
+m_canton_ch1$summary.random$georegion %>% 
+  ggplot(aes(x=mean)) +
+  geom_histogram(bins=20)
+```
+
+Because we added the offset, what we actually model are incidence rates, so that $\exp(\beta_i)$ can be interpreted as **incidence rate ratios** (IRR).
+The IRRs are interpreted with reference to an hypothetical "average canton", for whom the IRR would be 1.
+We see a lot of variation across cantons, from both Appenzell Ausserrhoden to Vaud. 
+
+```{r}
+irr = m_canton_ch1$summary.random$georegion %>% 
+  select(ID,mean,`0.025quant`,`0.975quant`) %>% 
+  mutate(across(2:4,exp)) %>% 
+  arrange(-mean)
+irr
+```
+
+```{r}
+irr %>% 
+  ggplot(aes(x=ID,y=mean,ymin=`0.025quant`,ymax=`0.975quant`)) +
+  geom_pointrange() +
+  geom_hline(yintercept=1,linetype=2) +
+  scale_x_discrete(limits=irr$ID) +
+  scale_y_log10() +
+  coord_flip()
+```
+## Exercice
+
+Fit a model of reported influenza cases in 2022 by canton using fixed effects, and compare with model `m_canton_ch1`. 
+Compare the reported incidence rate of influenza across age groups. 
+
+# References

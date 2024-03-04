@@ -1,0 +1,254 @@
+---
+title: "Spatio-temporal disease mapping with `R-INLA`"
+author: "Julien Riou"
+date: "2024-03-07"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: pygments
+    fig_width: 8
+    fig_height: 5
+bibliography: biblio.bib  
+---
+
+```{r, include=FALSE}
+rmarkdown::render("1_setup.Rmd")
+knitr::opts_chunk$set(echo = TRUE, fig.align="center")
+shape_cantons = readRDS(file="data/shape_cantons.rds")
+```
+
+# Spatio-temporal models in `R-INLA`
+
+Lastly, we combine the spatial and temporal models that we learned to build spatio-temporal models.
+We continue to focus on reported influenza cases, now by canton over time.
+
+```{r}
+flu_week_canton = flu %>% 
+  filter(georegion_type=="canton", georegion!="unknown", agegroup=="all", sex=="all", type=="all") %>% 
+  mutate(week_of_season=lag(week_of_year,flu_season_start_week),
+         week_of_season=ifelse(is.na(week_of_season),lead(week_of_season,52),week_of_season),
+         week_of_season2=week_of_season,
+         week_index2=week_index, # you have to repeat indexes as INLA doesn't allow the same variable twice
+         canton_index=as.numeric(as.factor(georegion)),
+         canton_index2=canton_index,
+         year_index=year-2012,
+         season_index=as.numeric(as.factor(season)))
+```
+
+```{r}
+ggplot(flu_week_canton,aes(x=week,y=incValue,colour=georegion)) +
+  geom_line() +
+  facet_wrap(~georegion)
+```
+
+## I.i.d. spatio-temporal
+
+One idea is to start from the temporal model (e.g. the one with seasonality), and just add one i.i.d. random effect that will scale the time series (again, the multiplicative effects come from the $\log$ link in Poisson regression).
+
+```{r}
+m_week_canton_ch1 = inla(value ~ 1 +
+                           f(week_index, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                           f(week_of_year, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                           f(canton_index, model="iid", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE),
+                         offset = log(pop),
+                         data = flu_week_canton,
+                         family = "poisson",
+                         control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+                         control.compute = list(waic=TRUE))
+summary(m_week_canton_ch1)
+```
+
+As always, we begin with a look at the model fit. 
+For visibility we can focus on the first 4 cantons.
+
+```{r}
+m_week_canton_ch1$summary.fitted.values %>% 
+  bind_cols(flu_week_canton) %>% 
+  filter(canton_index<=4) %>% 
+  ggplot(aes(x=week)) +
+  geom_point(aes(y=value), shape=21) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`,fill=georegion),alpha=.5)  +
+  geom_line(aes(y=mean,colour=georegion)) +
+  facet_wrap(~georegion,scales="free_y")
+```
+
+The model appears to do what it's supposed to: there is one unique temporal shape that is scaled upwards or downwards in each canton.
+Of course there are deviations in each canton (we will deal with them later), but the fit is not terrible, with the peaks and valleys more or less aligned, and the magnitude approximately well captured.
+We can look at the magnitude of the canton-specific scaling.
+
+```{r}
+temp_ = m_week_canton_ch1$summary.random$canton_index %>% 
+  select(canton_index=ID,mean,`0.025quant`,`0.975quant`) %>% 
+  mutate(across(2:4,exp)) %>% 
+  left_join(flu_week_canton %>% filter(year==2023) %>% select(canton_index,georegion) %>% distinct(),by = join_by(canton_index)) %>%
+  arrange(mean)
+ggplot(temp_,aes(x=georegion,y=mean,ymin=`0.025quant`,ymax=`0.975quant`,colour=georegion)) +
+  geom_pointrange() +
+  geom_hline(yintercept=1,linetype=2) +
+  scale_x_discrete(limits=temp_$georegion)
+```
+
+```{r}
+shape_cantons %>% 
+  left_join(temp_,by = join_by(georegion)) %>% 
+  ggplot() +
+  geom_sf(aes(fill=mean)) +
+  scale_fill_viridis_c()
+```
+
+The results are similar but a bit different than back in file `4_space`, when we compared yearly totals across cantons in 2022 only.
+These are averaged over the whole period.
+
+We can extend the approach to measure a cantonal effects for each year, in order to see whether these effects are systematic.
+For this we can use the `group` option, which allows to consider random effects stratified by some other variable.
+One limitation is that only indexes should be used for grouping (integers from 1 to N).
+
+```{r}
+m_week_canton_ch2 = inla(value ~ 1 +
+                           f(week_index, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                           f(week_of_year, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                           f(canton_index, group=season_index, model="iid", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE),
+                         offset = log(pop),
+                         data = flu_week_canton,
+                         family = "poisson",
+                         control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+                         control.compute = list(waic=TRUE))
+summary(m_week_canton_ch2)
+```
+
+So now, while the shape of the time trend is the same in each canton, the canton-level scaling can now change from one year to the next.
+We can see whether there is an overall pattern.
+
+```{r}
+temp_2 = m_week_canton_ch2$summary.random$canton_index %>% 
+  select(canton_index=ID,mean,`0.025quant`,`0.975quant`) %>% 
+  mutate(across(2:4,exp)) %>% 
+  left_join(flu_week_canton %>% filter(year==2023) %>% select(canton_index,georegion) %>% distinct(),by = join_by(canton_index)) %>%
+  group_by(georegion) %>% 
+  mutate(year=row_number()+2012) 
+ggplot(temp_2,aes(x=georegion,y=mean,ymin=`0.025quant`,ymax=`0.975quant`,colour=georegion)) +
+  geom_pointrange() +
+  geom_hline(yintercept=1,linetype=2)  +
+  scale_x_discrete(limits=temp_$georegion) +
+  facet_wrap(~year) +
+  scale_y_log10() +
+  theme(axis.text.x = element_text(size=5))
+```
+
+```{r}
+shape_cantons %>% 
+  left_join(temp_2,by = join_by(georegion)) %>% 
+  ggplot() +
+  geom_sf(aes(fill=mean)) +
+  facet_wrap(~year) +
+  scale_fill_viridis_c(trans="log10") 
+```
+
+We do see some general patterns: the cantons with a highest and lowest IRRs are generally the same over the years.
+
+We can now focus on cantonal level deviations from the national average.
+
+```{r}
+m_week_canton_ch3 = inla(value ~ 1 +
+                           f(week_index, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                           f(week_of_year, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                           f(canton_index,model="iid", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) +
+                           f(week_index2, model="rw1", group=canton_index2, hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE),
+                         offset = log(pop),
+                         data = flu_week_canton,
+                         family = "poisson",
+                         num.threads = 4,
+                         control.fixed = list(mean.intercept=0, prec.intercept=1/10^2),
+                         control.compute = list(waic=TRUE))
+summary(m_week_canton_ch3)
+```
+
+The model is starting to get complicated, and the computing time reflects this complexity (about 2 minutes). 
+Note the grouping: it means that we want a `rw1` temporal effect for each canton, meant to capture the deviation from the national average. 
+As a result, the model fit in each canton should be better.
+
+```{r}
+m_week_canton_ch3$summary.fitted.values %>% 
+  bind_cols(flu_week_canton) %>% 
+  filter(canton_index<=4) %>% 
+  ggplot(aes(x=week)) +
+  geom_point(aes(y=value), shape=21) +
+  geom_ribbon(aes(ymin=`0.025quant`,ymax=`0.975quant`,fill=georegion),alpha=.5)  +
+  geom_line(aes(y=mean,colour=georegion)) +
+  facet_wrap(~georegion,scales="free_y")
+```
+
+This residual effect captures outliers, so that the estimation of the canton-specific effects should be more reliable.
+
+```{r}
+temp_3 = m_week_canton_ch3$summary.random$canton_index %>% 
+  select(canton_index=ID,mean,`0.025quant`,`0.975quant`) %>% 
+  mutate(across(2:4,exp)) %>% 
+  left_join(flu_week_canton %>% filter(year==2023) %>% select(canton_index,georegion) %>% distinct(),by = join_by(canton_index)) %>%
+  group_by(georegion) %>% 
+  mutate(year=row_number()+2012) 
+ggplot(temp_3,aes(x=georegion,y=mean,ymin=`0.025quant`,ymax=`0.975quant`,colour=georegion)) +
+  geom_pointrange() +
+  geom_hline(yintercept=1,linetype=2)  +
+  scale_x_discrete(limits=temp_$georegion) +
+  facet_wrap(~year) +
+  scale_y_log10() 
+```
+
+```{r}
+shape_cantons %>% 
+  left_join(temp_3,by = join_by(georegion)) %>% 
+  ggplot() +
+  geom_sf(aes(fill=mean)) +
+  facet_wrap(~year) +
+  scale_fill_viridis_c(trans="log10") 
+```
+
+## Exercise
+
+Of course, one piece is still missing. 
+We've been considering i.i.d. random effects by canton, but what we really want is to account for the spatial structure of cantons.
+This is the final exercise: consider the canton-specific effects within a BYM spatio-temporal model.
+You can start from model `m_week_canton_ch1`, but feel free to explore other options (`rw2`, `ar1`, `group`...).
+It can also help to compare models with WAIC.
+One possible approach is commented out in the `.Rmd` version of this script.
+
+
+<!-- ```{r} -->
+<!-- prior_bym = list(theta1 = list('PCprior', c(1, 0.01)), theta2 = list('PCprior', c(0.5, 0.5))) -->
+<!-- m_week_canton_ch4 = inla(value ~ 1 + -->
+<!--                            f(week_index, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) + -->
+<!--                            f(week_of_year, model="rw1", hyper=list(prec=list(param=c(1, 0.1))), constr=TRUE) + -->
+<!--                            f(canton_index, model="bym2", hyper=prior_bym, graph="data/shape_cantons_adj", constr=TRUE), -->
+<!--                          offset = log(pop), -->
+<!--                          data = flu_week_canton, -->
+<!--                          family = "poisson", -->
+<!--                          control.fixed = list(mean.intercept=0, prec.intercept=1/10^2), -->
+<!--                          control.compute = list(waic=TRUE)) -->
+<!-- summary(m_week_canton_ch4) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- temp_4 = m_week_canton_ch4$summary.random$canton_index[1:26,] %>%  -->
+<!--   select(canton_index=ID,mean,`0.025quant`,`0.975quant`) %>%  -->
+<!--   mutate(across(2:4,exp)) %>%  -->
+<!--   left_join(flu_week_canton %>% filter(year==2023) %>% select(canton_index,georegion) %>% distinct(),by = join_by(canton_index)) %>% -->
+<!--   arrange(mean) -->
+<!-- ggplot(temp_4,aes(x=georegion,y=mean,ymin=`0.025quant`,ymax=`0.975quant`,colour=georegion)) + -->
+<!--   geom_pointrange() + -->
+<!--   geom_hline(yintercept=1,linetype=2) + -->
+<!--   scale_x_discrete(limits=temp_$georegion) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- shape_cantons %>%  -->
+<!--   left_join(temp_4,by = join_by(georegion)) %>%  -->
+<!--   ggplot() + -->
+<!--   geom_sf(aes(fill=mean)) + -->
+<!--   scale_fill_viridis_c() -->
+<!-- ``` -->
+
+# References
