@@ -29,29 +29,28 @@ library(spdep)
 
 See details on https://www.r-inla.org/download-install.
 
-```{r}
-if(FALSE) install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
-library(INLA)
-```
-
 ## Test `R-INLA` installation
 
 ```{r}
-n = 300; a = 42; b = 2.3; s = 8
-x = runif(n,0,10)
-lp = a + b*x
-y = rnorm(n,lp,s)
-dd = data.frame(x=x,y=y)
-ggplot(dd,aes(x,y)) + geom_point()
+n <- 300
+a <- 42
+b <- 2.3
+s <- 8
+x <- runif(n, 0, 10)
+lp <- a + b * x
+y <- rnorm(n, lp, s)
+dd <- data.frame(x = x, y = y)
+ggplot(dd, aes(x, y)) +
+  geom_point()
 ```
 
 ```{r}
-test_lm = lm(y ~ x, data=dd)
+test_lm <- lm(y ~ x, data = dd)
 summary(test_lm)
 ```
 
 ```{r}
-test_inla = inla(y ~ x, family = "gaussian", data=dd)
+test_inla <- inla(y ~ x, family = "gaussian", data = dd)
 summary(test_inla)
 ```
 
@@ -60,26 +59,42 @@ summary(test_inla)
 ### Download, unzip and load
 
 ```{r}
-pathfile = "data/INFLUENZA_oblig.zip"
-if(!file.exists("data/INFLUENZA_oblig.zip")) {
+pathfile <- "data/INFLUENZA_oblig.zip"
+if (!file.exists("data/INFLUENZA_oblig.zip")) {
   download.file("https://idd.bag.admin.ch/api/v1/export/20240221/INFLUENZA_oblig/zip",
-                destfile = "data/INFLUENZA_oblig.zip",
-                method="curl")
-  unzip(zipfile="data/INFLUENZA_oblig.zip", exdir = "data/INFLUENZA_oblig/")
+    destfile = "data/INFLUENZA_oblig.zip",
+    method = "curl"
+  )
+  unzip(zipfile = "data/INFLUENZA_oblig.zip", exdir = "data/INFLUENZA_oblig/")
 }
-flu = readr::read_csv("data/INFLUENZA_oblig/data.csv")
+flu <- readr::read_csv("data/INFLUENZA_oblig/data.csv")
 ```
 
 ### Data management
 
 ```{r}
-flu_season_start_week = 35
-flu = flu %>% 
-  mutate(week=ISOweek::ISOweek2date(paste0(temporal,"-4")), # replace ISOweek string with date of the Thursday of each week
-         year=lubridate::year(week),                 
-         year2=as.factor(year),                      
-         week_of_year=lubridate::week(week)) %>%      
-  filter(year>=2013)
-flu$week_index = as.numeric(flu$week-min(flu$week))/7+1
-flu$season = ifelse(flu$week_of_year<flu_season_start_week,paste0(flu$year-1,"-",flu$year),paste0(flu$year,"-",flu$year+1))
+flu <- flu %>%
+  mutate(
+    week = ISOweek::ISOweek2date(paste0(temporal, "-4")), # replace ISOweek string with date of the Thursday of each week
+    year = lubridate::year(week), # year
+    week_n = lubridate::week(week)
+  ) %>% # week number
+  filter(year >= 2013)
+```
+
+### Different data formats
+
+```{r}
+flu_week_ch <- flu %>%
+  filter(georegion == "CHFL", agegroup == "all", sex == "all", type == "all")
+flu_week_ch_age <- flu %>%
+  filter(georegion == "CHFL", agegroup %in% c("0 - 4", "5 - 14", "15 - 29", "30 - 64", "65+"), sex == "all", type == "all")
+```
+
+### Description
+
+```{r}
+flu_week_ch %>%
+  ggplot(aes(x = week, y = value)) +
+  geom_line()
 ```

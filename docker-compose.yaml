@@ -1,0 +1,14 @@
+version: "3.3"
+services:
+  rstudio-server: 
+    image: rocker/geospatial:4.3.3-ubuntugis
+    environment:
+      PASSWORD: helloworld
+    ports:
+      - 8787:8787
+    volumes:
+      - renv_docker:/renv/
+      - .:/home/rstudio/Documents
+volumes:
+  renv_docker:
+
