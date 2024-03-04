@@ -4,7 +4,7 @@
     "Repositories": [
       {
         "Name": "CRAN",
-        "URL": "https://https://cloud.r-project.org"
+        "URL": "https://packagemanager.rstudio.com/cran/2022-10-28"
       },
       {
         "Name": "INLA",
