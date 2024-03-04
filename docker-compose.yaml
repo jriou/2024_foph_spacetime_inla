@@ -4,8 +4,8 @@ services:
     image: rocker/geospatial:4.3.3-ubuntugis
     environment:
       PASSWORD: helloworld
-    expose:
-      - 8787
+    ports:
+      - 8787:8787
     volumes:
       - renv_docker:/renv/
       - .:/home/rstudio/Documents
