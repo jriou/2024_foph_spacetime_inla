@@ -16,6 +16,19 @@ bibliography: biblio.bib
 
 # Set-up
 
+## install `R-INLA` if needed (INLA is not on CRAN)
+
+```{r install inla if needed}
+is_INLA_present <- require("INLA")
+if(!is_INLA_present){
+  install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/testing"), dep=TRUE)
+} else {
+  is_INLA_present
+}
+
+```
+See details on https://www.r-inla.org/download-install.
+
 ## Libs
 
 ```{r setup}
@@ -23,11 +36,9 @@ library(tidyverse)
 library(sf)
 library(ISOweek)
 library(spdep)
+library(INLA)
 ```
 
-## `R-INLA` is not on CRAN!
-
-See details on https://www.r-inla.org/download-install.
 
 ## Test `R-INLA` installation
 
@@ -60,12 +71,12 @@ summary(test_inla)
 
 ```{r}
 pathfile <- "data/INFLUENZA_oblig.zip"
+fs::dir_create("data/INFLUENZA_oblig/")
 if (!file.exists("data/INFLUENZA_oblig.zip")) {
-  download.file("https://idd.bag.admin.ch/api/v1/export/20240221/INFLUENZA_oblig/zip",
-    destfile = "data/INFLUENZA_oblig.zip",
-    method = "curl"
+  download.file("https://idd.bag.admin.ch/api/v1/export/20240221/INFLUENZA_oblig/csv",
+    destfile = "data/INFLUENZA_oblig/data.csv",
+    method = "wininet"
   )
-  unzip(zipfile = "data/INFLUENZA_oblig.zip", exdir = "data/INFLUENZA_oblig/")
 }
 flu <- readr::read_csv("data/INFLUENZA_oblig/data.csv")
 ```
