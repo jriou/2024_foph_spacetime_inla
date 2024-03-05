@@ -1659,7 +1659,7 @@ words, the incidence ratio between men and women will be:</p>
 ##    silent = silent, &quot;, &quot; inla.mode = inla.mode, safe = FALSE, debug = 
 ##    debug, .parent.frame = .parent.frame)&quot; ) 
 ## Time used:
-##     Pre = 0.764, Running = 0.236, Post = 0.0387, Total = 1.04 
+##     Pre = 2.96, Running = 0.931, Post = 0.151, Total = 4.04 
 ## Fixed effects:
 ##               mean    sd 0.025quant 0.5quant 0.975quant   mode kld
 ## (Intercept)  8.530 0.004      8.522    8.530      8.538  8.530   0
@@ -1742,7 +1742,7 @@ effects for two groups.</p>
 ##    silent = silent, &quot;, &quot; inla.mode = inla.mode, safe = FALSE, debug = 
 ##    debug, .parent.frame = .parent.frame)&quot; ) 
 ## Time used:
-##     Pre = 0.766, Running = 0.27, Post = 0.0692, Total = 1.11 
+##     Pre = 2.77, Running = 0.842, Post = 0.15, Total = 3.76 
 ## Fixed effects:
 ##              mean    sd 0.025quant 0.5quant 0.975quant  mode   kld
 ## (Intercept) 8.497 0.027      8.441    8.497      8.552 8.497 0.007
@@ -1763,12 +1763,12 @@ effects for two groups.</p>
 anymore, the effect of gender does not appear directly, but can be
 extracted from the model object.</p>
 <div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>m_year_sex_ch2<span class="sc">$</span>summary.random<span class="sc">$</span>sex</span></code></pre></div>
-<pre><code>##       ID        mean         sd  0.025quant    0.5quant 0.975quant        mode
-## 1 female  0.03201385 0.02677150 -0.02287934  0.03175169 0.08818955  0.03179427
-## 2   male -0.03189194 0.02676946 -0.08789886 -0.03167349 0.02316607 -0.03168405
+<pre><code>##       ID        mean         sd  0.025quant   0.5quant 0.975quant        mode
+## 1 female  0.03201385 0.02677152 -0.02287939  0.0317517 0.08818960  0.03179427
+## 2   male -0.03189194 0.02676948 -0.08789892 -0.0316735 0.02316612 -0.03168405
 ##           kld
-## 1 0.007157901
-## 2 0.007155571</code></pre>
+## 1 0.007157470
+## 2 0.007155141</code></pre>
 <p>It’s interesting to note that instead of having an effect in males
 compared to females of <code>-0.066</code>, we find basically half of
 this effect on each side of zero: <code>-0.032</code> in males and
@@ -1778,7 +1778,7 @@ before, it is easier to interpret the exponents.</p>
 <div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="fu">exp</span>(m_year_sex_ch2<span class="sc">$</span>summary.random<span class="sc">$</span>sex[,<span class="fu">c</span>(<span class="st">&quot;mean&quot;</span>,<span class="st">&quot;0.025quant&quot;</span>,<span class="st">&quot;0.975quant&quot;</span>)])</span></code></pre></div>
 <pre><code>##        mean 0.025quant 0.975quant
 ## 1 1.0325318  0.9773804   1.092195
-## 2 0.9686112  0.9158535   1.023436</code></pre>
+## 2 0.9686112  0.9158535   1.023437</code></pre>
 <p>Compared to an “average gender”, there are 3% more female cases and
 3% less male cases. Of course in the case of gender the average does not
 make so much sense (although), but it would work well for other
@@ -1882,7 +1882,7 @@ to count data and would not work with incidence rates).</p>
 ##    silent = silent, &quot;, &quot; inla.mode = inla.mode, safe = FALSE, debug = 
 ##    debug, .parent.frame = .parent.frame)&quot; ) 
 ## Time used:
-##     Pre = 0.812, Running = 0.301, Post = 0.0662, Total = 1.18 
+##     Pre = 3.08, Running = 1.07, Post = 0.259, Total = 4.41 
 ## Fixed effects:
 ##               mean    sd 0.025quant 0.5quant 0.975quant   mode kld
 ## (Intercept) -6.059 0.097     -6.252   -6.059     -5.867 -6.059   0
@@ -1919,25 +1919,25 @@ both Appenzell Ausserrhoden to Vaud.</p>
 <span id="cb24-4"><a href="#cb24-4" tabindex="-1"></a>  <span class="fu">arrange</span>(<span class="sc">-</span>mean)</span>
 <span id="cb24-5"><a href="#cb24-5" tabindex="-1"></a>irr</span></code></pre></div>
 <pre><code>##    ID      mean 0.025quant 0.975quant
-## 1  VD 2.0847006  1.7169428  2.5348054
+## 1  VD 2.0847006  1.7169428  2.5348055
 ## 2  BS 1.9345582  1.5813673  2.3708217
-## 3  VS 1.9243979  1.5797677  2.3478688
-## 4  GE 1.9042766  1.5657448  2.3194216
-## 5  JU 1.8411503  1.4806996  2.2946808
-## 6  TI 1.8323727  1.5037233  2.2363081
-## 7  SO 1.6521794  1.3528249  2.0209302
-## 8  BL 1.6154603  1.3229449  1.9756938
-## 9  UR 1.2668419  0.9775684  1.6445707
+## 3  VS 1.9243979  1.5797677  2.3478689
+## 4  GE 1.9042766  1.5657448  2.3194217
+## 5  JU 1.8411504  1.4806996  2.2946808
+## 6  TI 1.8323727  1.5037232  2.2363081
+## 7  SO 1.6521795  1.3528249  2.0209303
+## 8  BL 1.6154603  1.3229448  1.9756939
+## 9  UR 1.2668419  0.9775684  1.6445708
 ## 10 SH 1.1199782  0.8912165  1.4091604
-## 11 GL 1.1148854  0.8590254  1.4486380
+## 11 GL 1.1148854  0.8590253  1.4486380
 ## 12 FR 1.0432318  0.8518009  1.2791916
-## 13 NE 0.9758401  0.7884685  1.2089168
+## 13 NE 0.9758401  0.7884685  1.2089169
 ## 14 GR 0.9565669  0.7746105  1.1824098
 ## 15 ZG 0.8555352  0.6839889  1.0706608
 ## 16 ZH 0.8262447  0.6799271  1.0052343
-## 17 AG 0.8197798  0.6721612  1.0008803
-## 18 BE 0.7545313  0.6197217  0.9196558
-## 19 AI 0.7066761  0.4793875  1.0379445
+## 17 AG 0.8197798  0.6721612  1.0008804
+## 18 BE 0.7545313  0.6197216  0.9196558
+## 19 AI 0.7066760  0.4793875  1.0379445
 ## 20 LU 0.6511605  0.5300852  0.8003440
 ## 21 OW 0.6261468  0.4595462  0.8508035
 ## 22 NW 0.5958015  0.4405084  0.8035152
