@@ -84,13 +84,15 @@ flu <- readr::read_csv("data/INFLUENZA_oblig/data.csv")
 ### Data management
 
 ```{r}
-flu <- flu %>%
-  mutate(
-    week = ISOweek::ISOweek2date(paste0(temporal, "-4")), # replace ISOweek string with date of the Thursday of each week
-    year = lubridate::year(week), # year
-    week_n = lubridate::week(week)
-  ) %>% # week number
-  filter(year >= 2013)
+flu_season_start_week = 35
+flu = flu %>% 
+  mutate(week=ISOweek::ISOweek2date(paste0(temporal,"-4")), # replace ISOweek string with date of the Thursday of each week
+         year=lubridate::year(week),                 
+         year2=as.factor(year),                      
+         week_of_year=lubridate::week(week)) %>%  
+  filter(year>=2013)
+flu$week_index = as.numeric(flu$week-min(flu$week))/7+1
+flu$season = ifelse(flu$week_of_year<flu_season_start_week,paste0(flu$year-1,"-",flu$year),paste0(flu$year,"-",flu$year+1))
 ```
 
 ### Different data formats
